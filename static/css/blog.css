@@ -107,3 +107,7 @@ input[type=submit] {
 .post:hover {
     background-color:#51515b;
 }
+
+label {
+    color:blue !important;
+}

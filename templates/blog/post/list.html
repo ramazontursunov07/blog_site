@@ -10,7 +10,7 @@
             <p class="date">
                 Published {{ post.publish }} by {{ post.author }}
             </p>
-
+            {{ post.body|truncatewords:30|linebreaks }}
         </div>
     {% endfor %}
     {% include 'paginator.html' with page=page_obj %}
