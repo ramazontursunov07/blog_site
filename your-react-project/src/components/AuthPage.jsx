@@ -55,7 +55,7 @@ export default function AuthPage({ onAuthSuccess }) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 8000);
     try {
-      const res = await fetch(`${API_BASE}/api/token/`, {
+      const res = await fetch(`${API_BASE}/login/`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(loginData),
@@ -72,17 +72,16 @@ export default function AuthPage({ onAuthSuccess }) {
         );
         return;
       }
-      const authToken = data.access || data.token;
-      if (!authToken) {
+      if (!data.access) {
         setFormError(
-          "Server javobida token topilmadi. Kelgan javob: " + JSON.stringify(data)
+          "Server javobida 'access' topilmadi. Kelgan javob: " + JSON.stringify(data)
         );
         return;
       }
-      setToken(authToken);
-      localStorage.setItem("token", authToken);
+      setToken(data.access);
+      localStorage.setItem("token", data.access);
       if (data.refresh) localStorage.setItem("refresh", data.refresh);
-      onAuthSuccess?.(authToken);
+      onAuthSuccess?.(data.access);
     } catch (err) {
       if (err.name === "AbortError") {
         setFormError(
@@ -108,26 +107,61 @@ export default function AuthPage({ onAuthSuccess }) {
     }
 
     setLoading(true);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
     try {
       const { password2, ...payload } = registerData;
       const res = await fetch(`${API_BASE}/register/`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        signal: controller.signal,
       });
-      const data = await res.json();
-      if (!res.ok) {
-        setErrors(data);
+      clearTimeout(timeoutId);
+
+      let data = {};
+      try {
+        data = await res.json();
+      } catch (parseErr) {
+        setFormError(
+          `Server javobini o'qib bo'lmadi (status ${res.status}). Backend ishlab turganini tekshiring.`
+        );
         return;
       }
+
+      if (!res.ok) {
+        if (typeof data === "object" && data !== null) {
+          setErrors(data);
+          setFormError(
+            data.detail || data.non_field_errors?.[0] || "Ro'yxatdan o'tishda xatolik yuz berdi."
+          );
+        } else {
+          setFormError("Ro'yxatdan o'tishda xatolik yuz berdi. Status: " + res.status);
+        }
+        return;
+      }
+
       const authToken = data.token || data.access;
+      if (!authToken) {
+        setFormError(
+          "Server javobida token topilmadi. Kelgan javob: " + JSON.stringify(data)
+        );
+        return;
+      }
       setToken(authToken);
       localStorage.setItem("token", authToken);
       if (data.refresh) localStorage.setItem("refresh", data.refresh);
       onAuthSuccess?.(authToken);
     } catch (err) {
-      setFormError("Serverga ulanib bo'lmadi. Backend ishga tushganini tekshiring.");
+      if (err.name === "AbortError") {
+        setFormError(
+          "Server 8 soniya ichida javob bermadi (vaqt tugadi). Backend ishga tushganini tekshiring."
+        );
+      } else {
+        setFormError("Xato: " + err.message);
+      }
     } finally {
+      clearTimeout(timeoutId);
       setLoading(false);
     }
   }
@@ -136,7 +170,7 @@ export default function AuthPage({ onAuthSuccess }) {
     try {
       await fetch(`${API_BASE}/logout/`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Token ${token}` },
       });
     } catch (err) {
       // Server bilan bog'lanmasa ham, mahalliy tokenni baribir tozalaymiz
