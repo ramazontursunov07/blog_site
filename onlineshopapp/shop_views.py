@@ -1,4 +1,5 @@
-from django.template.context_processors import request
+import os
+import anthropic
 from django_filters import rest_framework as django_filters
 from django.shortcuts import get_object_or_404
 from rest_framework.views import APIView
@@ -157,9 +158,56 @@ class MyTokenObtainPairView(TokenObtainPairView):
     serializer_class = MyTokenObtainPairSerializer
 
 
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def my_orders(request):
-    orders = Order.objects.filter(user=request.user).order_by('-created_at')
-    serializer = OrderSerializer(orders,many=True)
-    return Response(serializer.data)
+# ==================== AI Mijozlarga Yordam Chatbot ====================
+
+_anthropic_client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+
+SUPPORT_SYSTEM_PROMPT = """Siz "Online Do'kon" internet-do'konining mijozlarga yordam beruvchi AI yordamchisisiz.
+Faqat o'zbek tilida, qisqa, do'stona va aniq javob bering.
+
+Do'kon haqida ma'lumot:
+- Buyurtma berish: mahsulotni tanlab "Savatchaga qo'shish" tugmasini bosish, keyin savatchada "Buyurtma berish" tugmasini bosish kerak. Buyurtma darhol qabul qilinadi.
+- Yetkazib berish: odatda 1-3 ish kuni ichida, mintaqaga qarab farq qilishi mumkin.
+- To'lov: hozircha faqat naqd pul yoki plastik karta orqali, mahsulot yetkazilganda.
+- Buyurtmani bekor qilish: faqat "Kutilmoqda" holatidagi buyurtmalarni "Buyurtmalarim" bo'limidan bekor qilish mumkin.
+- Mahsulotni qaytarish: nuqsonli yoki noto'g'ri yetkazilgan mahsulotlarni 7 kun ichida qaytarish mumkin.
+- "Saralangan mahsulotlar" (wishlist): yurakcha belgisini bosib, mahsulotlarni alohida ro'yxatga saqlash mumkin.
+- Profilni tahrirlash: profil belgisi orqali ism, familiya, email, telefon, manzilni yangilash mumkin.
+- Parolni tiklash funksiyasi hozircha mavjud emas.
+
+Agar savol shu do'kon bilan bog'liq bo'lmasa yoki javobini bilmasangiz, buni ochiq ayting va
+qo'llab-quvvatlash xizmatiga murojaat qilishni tavsiya qiling. Hech qachon noto'g'ri yoki
+o'ylab topilgan ma'lumot bermang (masalan aniq narxlar yoki buyurtma holatini bilmasangiz)."""
+
+
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
+def support_chat(request):
+    user_message = (request.data.get('message') or '').strip()
+    history = request.data.get('history') or []  # [{role: 'user'|'assistant', content: '...'}, ...]
+
+    if not user_message:
+        return Response({'error': "Xabar bo'sh bo'lishi mumkin emas"}, status=400)
+    if len(user_message) > 2000:
+        return Response({'error': "Xabar juda uzun"}, status=400)
+
+    # Faqat oxirgi 10 ta xabarni yuboramiz (kontekstni cheklash uchun)
+    trimmed_history = history[-10:]
+    messages = trimmed_history + [{"role": "user", "content": user_message}]
+
+    try:
+        response = _anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            system=SUPPORT_SYSTEM_PROMPT,
+            messages=messages,
+        )
+        reply_text = "".join(
+            block.text for block in response.content if block.type == "text"
+        )
+        return Response({'reply': reply_text})
+    except Exception:
+        return Response(
+            {'error': "AI yordamchi hozircha javob bera olmayapti. Birozdan so'ng qayta urinib ko'ring."},
+            status=503,
+        )
