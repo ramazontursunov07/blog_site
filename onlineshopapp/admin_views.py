@@ -1,4 +1,5 @@
 from rest_framework.decorators import action
+from django.db import transaction
 from .models import Category, Product, Profile, Order, Cart, OrderItem, FlashSale, ProductViewHistory, ProductAttribute
 from rest_framework import viewsets
 
@@ -47,36 +48,62 @@ class AdminOrderViewSet(viewsets.ModelViewSet):
             return Order.objects.all()  # bu yerda esa agar admin bo'lsa hamma profilelarni ko'ra oladi.
         return Order.objects.filter(user=self.request.user)  # agar oddiy user bo'lsa unda faqat o'zinikini ko'ra oladi.
 
-    def create(self, request, *args, **kwargs):  # bu esa create funksiyasi bunda buyurtma yaratiladi.
-        cart = Cart.objects.filter(
-            user=request.user).first()  # bu yerda esa aynan buyurtma bergan userni buyurtmasini oladi.
-        if not cart or not cart.items.exists():  # bu yer esa savatchadagi barcha mahsulotlarni oladi.Agar yo'q bo'lsa xatolik.
-            return Response({"error": "Savatcha bo'sh"}, status=400)  # Savatcha bo'sh
+    def create(self, request, *args, **kwargs):
+        cart = Cart.objects.filter(user=request.user).first()
+        if not cart or not cart.items.exists():
+            return Response({"error": "Savatcha bo'sh"}, status=400)
 
-        total_price = sum(item.product.price * item.quantity for item in
-                          cart.items.all())  # Va bu yerda har bitta mahsulotni oladi va summasini hisoblaydi.
-        order = Order.objects.create(user=request.user,
-                                     total_price=total_price)  # va bu yerda esa yangi buyurtma yaratamiz va summasini yozib qo'yamiz.
-        for item in cart.items.all():  # bu yerda esa barcha mahsulotlarni oladi va ularni har bittasini forda aylantirib ularni nomma-nom qilib buyurtmani yozib qo'yadi.
-            OrderItem.objects.create(  # Yaratish
-                order=order, product=item.product, quantity=item.quantity, price=item.product.price,
-                total_price=item.product.price * item.quantity
-            )  # shu yergacha buyurtmani barcha ma'lumotlarini yozib chiqadi.
-        cart.items.all().delete()  # va yaratib bo'lgandan so'ng esa uni o'chirib yuboradi.
+        with transaction.atomic():
+            cart_items = list(cart.items.select_related('product').all())
+            product_ids = [item.product_id for item in cart_items]
 
-        serializer = self.get_serializer(order)  # bu yerda esa buyurtmni serilizatsiya qiladi.
-        return Response(serializer.data,
-                        status=201)  # bu yerda esa return qilib yuboradi serializatsiya qilingan ma'lumotlarni.
+            # select_for_update() — shu mahsulotlar qatorini "qulflaydi", shunda ikkita
+            # foydalanuvchi bir vaqtda oxirgi donani sotib olishga urinsa, ikkinchisi
+            # birinchisi tugagunicha kutadi (poyga sharoitining oldi olinadi)
+            locked_products = {
+                p.id: p for p in Product.objects.select_for_update().filter(id__in=product_ids)
+            }
 
-    @action(detail=True, methods=['post'])  # bu esa dekorator ya'ni bitta ma'lumot qaytaradi.Va post metodi.
-    def cancel(self, request, pk=None):  # bu esa shunchaki bekor qiish
-        order = self.get_object()  # bu esa aynan shu buyurtmani oladi.
-        if order.status != 'pending':  # bu yerda esa aynan statusi pending bo'lmasa unda xabar berdi.
-            return Response({'error': "Faqat kutilayotgan buyurtmani bekor qilish mumkin!!!"}, status=400)  # return
+            # Avval BARCHA mahsulotlar uchun yetarli miqdor borligini tekshiramiz
+            for item in cart_items:
+                product = locked_products[item.product_id]
+                if item.quantity > product.total:
+                    return Response(
+                        {"error": f"'{product.name}' mahsulotidan yetarli miqdor yo'q. Mavjud: {product.total} ta"},
+                        status=400
+                    )
 
-        order.status = 'cancelled'  # bu yerda esa buyurtma qilgandan so'ng esa uni bekor qilindi deb saqlab qo'yadi.
-        order.save()  # va saqlaydi
-        return Response(self.get_serializer(order).data)  # bu yerda esa serializatsiya qiladi.
+            total_price = sum(locked_products[item.product_id].price * item.quantity for item in cart_items)
+            order = Order.objects.create(user=request.user, total_price=total_price)
+
+            for item in cart_items:
+                product = locked_products[item.product_id]
+                OrderItem.objects.create(
+                    order=order, product=product, quantity=item.quantity, price=product.price,
+                    total_price=product.price * item.quantity
+                )
+                product.reduce_total(item.quantity)  # yuqorida tekshirilgani uchun bu yerda xavfsiz
+
+            cart.items.all().delete()
+
+        serializer = self.get_serializer(order)
+        return Response(serializer.data, status=201)
+
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        order = self.get_object()
+        if order.status != 'pending':
+            return Response({'error': "Faqat kutilayotgan buyurtmani bekor qilish mumkin!!!"}, status=400)
+
+        with transaction.atomic():
+            for item in order.items.select_related('product').all():
+                if item.product:
+                    item.product.increase_total(item.quantity)
+
+            order.status = 'cancelled'
+            order.save()
+
+        return Response(self.get_serializer(order).data)
 
 
 class AdminFlashSaleViewSet(viewsets.ModelViewSet):
